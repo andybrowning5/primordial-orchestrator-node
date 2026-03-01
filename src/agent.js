@@ -161,6 +161,10 @@ async function* socketStream(msg) {
   }
 }
 
+// --- Active session tracking ---
+
+const sessions = new Map(); // session_id → { agent_url, label, startedAt, status }
+
 // --- System prompt ---
 
 function buildSystemPrompt() {
@@ -193,7 +197,17 @@ If the user references something from a previous session, check the memory conte
 - If no agent matches, tell the user and attempt it yourself.
 - If a task spans multiple domains, start multiple sub-agents.
 - Tell the user which agent you're delegating to and why.
-- **NEVER stop a sub-agent without asking the user first.** Always confirm before calling stop_agent.`;
+- **NEVER stop a sub-agent without asking the user first.** Always confirm before calling stop_agent.
+
+## Active Sub-Agents
+
+${sessions.size === 0
+    ? "No sub-agents have been spawned this session."
+    : [...sessions.entries()].map(([sid, info]) =>
+        `- **${sid}** [${info.status}] (${info.label || info.agent_url}) — started ${info.startedAt}`
+      ).join("\n")}
+
+When the user asks to continue, follow up, or dig deeper with existing agents, use the session IDs above with message_agent. Stopped agents can be resumed — their session IDs remain valid. Do NOT start new agents if the ones above can handle the request.`;
 }
 
 // --- Tools ---
@@ -288,6 +302,12 @@ const toolHandlers = {
       if (event.type === "setup_status") {
         send({ type: "activity", tool: "sub:setup", description: event.status || "", session_id: event.session_id || "", message_id: messageId });
       } else if (event.type === "session") {
+        sessions.set(event.session_id, {
+          agent_url,
+          label: agent_url.split("/").pop(),
+          startedAt: new Date().toISOString(),
+          status: "running",
+        });
         send({ type: "activity", tool: "sub:spawned", description: event.session_id, session_id: event.session_id, message_id: messageId });
         return event.session_id;
       } else if (event.type === "error") {
@@ -333,7 +353,9 @@ const toolHandlers = {
   async stop_agent({ session_id }) {
     log(`[orchestrator] stopping ${session_id}`);
     await socketRequest({ type: "stop", session_id });
-    return "Agent stopped.";
+    const info = sessions.get(session_id);
+    if (info) info.status = "stopped";
+    return "Agent stopped. Session ID is still valid for resuming later.";
   },
 };
 
