@@ -204,9 +204,7 @@ const toolHandlers = {
   },
 
   async message_agent({ session_id, message }, messageId) {
-    const t0 = Date.now();
-    log(`[orchestrator] >>> SEND ${session_id} at ${t0}`);
-    send({ type: "activity", tool: "debug", description: `>>> SEND ${session_id} at ${t0}`, message_id: messageId });
+    log(`[orchestrator] messaging ${session_id}: ${message.slice(0, 80)}`);
     const activities = [];
     let finalResponse = "";
     for await (const event of socketStream({ type: "message", session_id, content: message })) {
@@ -225,7 +223,7 @@ const toolHandlers = {
         finalResponse = inner.content || "";
         const preview = finalResponse.replace(/\n/g, " ").slice(0, 150).trim();
         send({ type: "activity", tool: "sub:response", description: preview + (finalResponse.length > 150 ? "..." : ""), session_id, message_id: messageId });
-        log(`[orchestrator] <<< RECV ${session_id} at ${Date.now()} (took ${Date.now() - t0}ms)`);
+        log(`[orchestrator] ${session_id} response received`);
         return JSON.stringify({ response: finalResponse, activities });
       }
     }
