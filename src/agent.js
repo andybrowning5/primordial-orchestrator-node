@@ -163,7 +163,7 @@ async function* socketStream(msg) {
 
 // --- Active session tracking ---
 
-const sessions = new Map(); // session_id → { agent_url, label, startedAt, status }
+const sessions = new Map(); // session_id → { agent_url, label, startedAt, status, sessionName }
 
 // --- System prompt ---
 
@@ -207,7 +207,9 @@ ${sessions.size === 0
         `- **${sid}** [${info.status}] (${info.label || info.agent_url}) — started ${info.startedAt}`
       ).join("\n")}
 
-When the user asks to continue, follow up, or dig deeper with existing agents, use the session IDs above with message_agent — but ONLY if they are [running]. Stopped agents must be re-started with start_agent before you can message them. Do NOT start new agents if running ones above can handle the request.`;
+- [running] agents: use message_agent to send them messages directly.
+- [stopped] agents: use resume_agent to restart them with their saved state, then message_agent.
+- Do NOT start new agents if existing ones (running or stopped) can handle the request.`;
 }
 
 // --- Tools ---
@@ -275,9 +277,44 @@ const tools = [
       required: ["session_id"],
     },
   },
+  {
+    name: "resume_agent",
+    description: "Resume a previously stopped sub-agent. Restarts it from its saved state so it remembers the previous conversation. Use the session_id of the stopped agent.",
+    input_schema: {
+      type: "object",
+      properties: { session_id: { type: "string", description: "Session ID of the stopped agent to resume" } },
+      required: ["session_id"],
+    },
+  },
 ];
 
 // --- Tool handlers ---
+
+async function _runAgent(agent_url, sessionName, messageId) {
+  const runMsg = { type: "run", agent_url };
+  if (sessionName) runMsg.session = sessionName;
+  for await (const event of socketStream(runMsg)) {
+    if (event.type === "setup_status") {
+      send({ type: "activity", tool: "sub:setup", description: event.status || "", session_id: event.session_id || "", message_id: messageId });
+    } else if (event.type === "session") {
+      const sid = event.session_id;
+      // Capture session_name from the event or use what we sent
+      const sName = event.session_name || sessionName || sid;
+      sessions.set(sid, {
+        agent_url,
+        label: agent_url.split("/").pop(),
+        startedAt: new Date().toISOString(),
+        status: "running",
+        sessionName: sName,
+      });
+      send({ type: "activity", tool: "sub:spawned", description: sid, session_id: sid, message_id: messageId });
+      return sid;
+    } else if (event.type === "error") {
+      return `Error: ${event.error || "unknown"}`;
+    }
+  }
+  return "Error: unexpected end of stream";
+}
 
 const toolHandlers = {
   async remember({ query }) {
@@ -298,23 +335,7 @@ const toolHandlers = {
 
   async start_agent({ agent_url }, messageId) {
     log(`[orchestrator] starting: ${agent_url}`);
-    for await (const event of socketStream({ type: "run", agent_url })) {
-      if (event.type === "setup_status") {
-        send({ type: "activity", tool: "sub:setup", description: event.status || "", session_id: event.session_id || "", message_id: messageId });
-      } else if (event.type === "session") {
-        sessions.set(event.session_id, {
-          agent_url,
-          label: agent_url.split("/").pop(),
-          startedAt: new Date().toISOString(),
-          status: "running",
-        });
-        send({ type: "activity", tool: "sub:spawned", description: event.session_id, session_id: event.session_id, message_id: messageId });
-        return event.session_id;
-      } else if (event.type === "error") {
-        return `Error: ${event.error || "unknown"}`;
-      }
-    }
-    return "Error: unexpected end of stream";
+    return await _runAgent(agent_url, null, messageId);
   },
 
   async message_agent({ session_id, message }, messageId) {
@@ -355,7 +376,22 @@ const toolHandlers = {
     await socketRequest({ type: "stop", session_id });
     const info = sessions.get(session_id);
     if (info) info.status = "stopped";
-    return "Agent stopped. Session ID is still valid for resuming later.";
+    return "Agent stopped. Use resume_agent with this session_id to restart it with its saved state.";
+  },
+
+  async resume_agent({ session_id }, messageId) {
+    const info = sessions.get(session_id);
+    if (!info) return `Error: unknown session ${session_id}`;
+    if (info.status === "running") return `Agent ${session_id} is already running. Use message_agent instead.`;
+    if (!info.sessionName) return `Error: no saved session name for ${session_id} — cannot resume. Use start_agent instead.`;
+    log(`[orchestrator] resuming ${session_id} (session: ${info.sessionName})`);
+    const newSessionId = await _runAgent(info.agent_url, info.sessionName, messageId);
+    if (newSessionId && !newSessionId.startsWith("Error")) {
+      // Mark old session as replaced, point to new one
+      info.status = "replaced";
+      info.replacedBy = newSessionId;
+    }
+    return newSessionId;
   },
 };
 
