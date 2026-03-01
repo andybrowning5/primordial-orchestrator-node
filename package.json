@@ -1,0 +1,10 @@
+{
+  "name": "primordial-orchestrator",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Orchestrator agent that coordinates specialized sub-agents",
+  "main": "src/agent.js",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0"
+  }
+}

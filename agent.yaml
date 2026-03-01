@@ -1,0 +1,25 @@
+name: primordial-orchestrator
+version: 0.1.0
+description: Orchestrator agent that coordinates specialized sub-agents on the Primordial AgentStore
+language: node
+model: claude-haiku-4-5-20251001
+
+setup_command: npm install
+run_command: node src/agent.js
+
+delegation:
+  enabled: true
+
+keys: []
+
+permissions:
+  network: true
+  filesystem: false
+
+metadata:
+  author: andy
+  category: orchestration
+  tags:
+    - orchestrator
+    - delegation
+    - multi-agent
