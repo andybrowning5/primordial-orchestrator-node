@@ -290,9 +290,10 @@ const tools = [
 
 // --- Tool handlers ---
 
-async function _runAgent(agent_url, sessionName, messageId) {
+async function _runAgent(agent_url, sessionName, messageId, preferredSessionId) {
   const runMsg = { type: "run", agent_url };
   if (sessionName) runMsg.session = sessionName;
+  if (preferredSessionId) runMsg.session_id = preferredSessionId;
   for await (const event of socketStream(runMsg)) {
     if (event.type === "setup_status") {
       send({ type: "activity", tool: "sub:setup", description: event.status || "", session_id: event.session_id || "", message_id: messageId });
@@ -385,9 +386,9 @@ const toolHandlers = {
     if (info.status === "running") return `Agent ${session_id} is already running. Use message_agent instead.`;
     if (!info.sessionName) return `Error: no saved session name for ${session_id} — cannot resume. Use start_agent instead.`;
     log(`[orchestrator] resuming ${session_id} (session: ${info.sessionName})`);
-    const newSessionId = await _runAgent(info.agent_url, info.sessionName, messageId);
-    if (newSessionId && !newSessionId.startsWith("Error")) {
-      // Mark old session as replaced, point to new one
+    const newSessionId = await _runAgent(info.agent_url, info.sessionName, messageId, session_id);
+    if (newSessionId && !newSessionId.startsWith("Error") && newSessionId !== session_id) {
+      // Manager assigned a different ID (name conflict) — update tracking
       info.status = "replaced";
       info.replacedBy = newSessionId;
     }
