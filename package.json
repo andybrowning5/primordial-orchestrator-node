@@ -2,6 +2,9 @@
   "name": "primordial-orchestrator",
   "version": "0.1.0",
   "type": "module",
+  "scripts": {
+    "build": "esbuild src/agent.js --bundle --platform=node --format=esm --outfile=bundle.mjs"
+  },
   "description": "Orchestrator agent that coordinates specialized sub-agents",
   "main": "src/agent.js",
   "dependencies": {
