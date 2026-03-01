@@ -1,6 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { createInterface } from "readline";
 import { connect } from "net";
+import { mkdirSync, existsSync, writeFileSync, appendFileSync, readFileSync } from "fs";
+import { join } from "path";
 
 const SOCKET_PATH = "/tmp/_primordial_delegate.sock";
 const MODEL = process.env.ANTHROPIC_MODEL || "claude-haiku-4-5-20251001";
@@ -13,6 +15,77 @@ function send(msg) {
 
 function log(text) {
   process.stderr.write(text + "\n");
+}
+
+// --- Conversational Memory ---
+
+const MEMORY_DIR = "/home/user/data/memory";
+const CONVERSATIONS_FILE = join(MEMORY_DIR, "conversations.jsonl");
+const FACTS_FILE = join(MEMORY_DIR, "facts.json");
+
+function initMemory() {
+  mkdirSync(MEMORY_DIR, { recursive: true });
+  if (!existsSync(CONVERSATIONS_FILE)) writeFileSync(CONVERSATIONS_FILE, "");
+  if (!existsSync(FACTS_FILE)) writeFileSync(FACTS_FILE, JSON.stringify({ facts: [], entities: {} }));
+}
+
+function saveTurn(userMsg, assistantMsg) {
+  const entry = { timestamp: new Date().toISOString(), user: userMsg, assistant: assistantMsg };
+  appendFileSync(CONVERSATIONS_FILE, JSON.stringify(entry) + "\n");
+}
+
+function getRecentConversations(limit = 10) {
+  try {
+    const lines = readFileSync(CONVERSATIONS_FILE, "utf-8").trim().split("\n").filter(Boolean);
+    return lines.slice(-limit).map((l) => JSON.parse(l));
+  } catch { return []; }
+}
+
+function loadFacts() {
+  try { return JSON.parse(readFileSync(FACTS_FILE, "utf-8")); } catch { return { facts: [], entities: {} }; }
+}
+
+function getContext() {
+  const parts = [];
+  const recent = getRecentConversations();
+  if (recent.length) {
+    parts.push("### Recent orchestration sessions");
+    for (const c of recent) {
+      parts.push(`[${c.timestamp}] User: ${c.user.slice(0, 150)}`);
+      parts.push(`Response: ${c.assistant.slice(0, 200)}`);
+    }
+  }
+  const facts = loadFacts();
+  if (facts.facts?.length) {
+    parts.push("\n### Known facts");
+    for (const f of facts.facts) parts.push(`- ${f}`);
+  }
+  if (facts.entities && Object.keys(facts.entities).length) {
+    parts.push("\n### Known entities");
+    for (const [name, info] of Object.entries(facts.entities)) {
+      parts.push(`- ${name}: ${typeof info === "string" ? info : JSON.stringify(info)}`);
+    }
+  }
+  return parts.join("\n") || "";
+}
+
+function searchMemory(query) {
+  const q = query.toLowerCase();
+  const results = [];
+  for (const c of getRecentConversations(50)) {
+    if ((c.user + c.assistant).toLowerCase().includes(q)) {
+      results.push(`[${c.timestamp}] User: ${c.user.slice(0, 100)} → Response: ${c.assistant.slice(0, 100)}`);
+    }
+  }
+  const facts = loadFacts();
+  for (const f of facts.facts || []) {
+    if (f.toLowerCase().includes(q)) results.push(`Fact: ${f}`);
+  }
+  for (const [name, info] of Object.entries(facts.entities || {})) {
+    const infoStr = typeof info === "string" ? info : JSON.stringify(info);
+    if ((name + infoStr).toLowerCase().includes(q)) results.push(`Entity: ${name} — ${infoStr}`);
+  }
+  return results.length ? results.join("\n") : `No results for "${query}"`;
 }
 
 // --- Socket helpers ---
@@ -90,7 +163,8 @@ async function* socketStream(msg) {
 
 // --- System prompt ---
 
-const SYSTEM_PROMPT = `You are the Primordial Orchestrator. You coordinate specialized agents on the Primordial AgentStore.
+function buildSystemPrompt() {
+  return `You are the Primordial Orchestrator. You coordinate specialized agents on the Primordial AgentStore.
 
 ## Core Principle
 
@@ -107,6 +181,12 @@ You are a coordinator, not a doer. For every user request, call **list_all_agent
 7. **Before stopping a sub-agent**, always ask the user for confirmation first.
 8. Only call **stop_agent** after the user explicitly approves.
 
+## Memory
+
+You have persistent memory across sessions. Previous orchestration sessions and facts are automatically provided with each message. Use the \`remember\` tool to search for specific past interactions when needed.
+
+If the user references something from a previous session, check the memory context or use the remember tool.
+
 ## Rules
 
 - Always list agents before responding to a task — don't guess or skip this.
@@ -114,10 +194,20 @@ You are a coordinator, not a doer. For every user request, call **list_all_agent
 - If a task spans multiple domains, start multiple sub-agents.
 - Tell the user which agent you're delegating to and why.
 - **NEVER stop a sub-agent without asking the user first.** Always confirm before calling stop_agent.`;
+}
 
 // --- Tools ---
 
 const tools = [
+  {
+    name: "remember",
+    description: "Search your memory for past orchestration sessions, facts, and entities. Use this when the user references something from a previous session.",
+    input_schema: {
+      type: "object",
+      properties: { query: { type: "string", description: "What to search for in memory" } },
+      required: ["query"],
+    },
+  },
   {
     name: "search_agents",
     description: "Semantic search for agents on the Primordial AgentStore. Returns agents ranked by relevance.",
@@ -176,6 +266,10 @@ const tools = [
 // --- Tool handlers ---
 
 const toolHandlers = {
+  async remember({ query }) {
+    return searchMemory(query);
+  },
+
   async search_agents({ query }) {
     log(`[orchestrator] searching: ${query}`);
     const resp = await socketRequest({ type: "search", query });
@@ -245,14 +339,19 @@ const toolHandlers = {
 
 // --- Agentic loop ---
 
-async function research(content, messageId) {
-  const messages = [{ role: "user", content }];
+async function orchestrate(content, messageId) {
+  const memoryContext = getContext();
+  const enrichedContent = memoryContext
+    ? `## Memory context from past sessions\n${memoryContext}\n\n## User message\n${content}`
+    : content;
+
+  const messages = [{ role: "user", content: enrichedContent }];
 
   while (true) {
     const resp = await anthropic.messages.create({
       model: MODEL,
       max_tokens: 4096,
-      system: SYSTEM_PROMPT,
+      system: buildSystemPrompt(),
       tools,
       messages,
     });
@@ -268,7 +367,9 @@ async function research(content, messageId) {
 
     // If no tool use, return final text
     if (resp.stop_reason === "end_turn" || !resp.content.some((b) => b.type === "tool_use")) {
-      return resp.content.filter((b) => b.type === "text").map((b) => b.text).join("") || "";
+      const result = resp.content.filter((b) => b.type === "text").map((b) => b.text).join("") || "";
+      saveTurn(content, result);
+      return result;
     }
 
     // Process tool calls in parallel
@@ -298,6 +399,7 @@ async function research(content, messageId) {
 // --- Primordial Protocol ---
 
 function main() {
+  initMemory();
   send({ type: "ready" });
   log("Primordial Orchestrator (Node.js) ready");
 
@@ -319,7 +421,7 @@ function main() {
     if (msg.type === "message") {
       const mid = msg.message_id;
       try {
-        const result = await research(msg.content, mid);
+        const result = await orchestrate(msg.content, mid);
         send({ type: "response", content: result, message_id: mid, done: true });
       } catch (e) {
         log(`Error: ${e.message}`);
