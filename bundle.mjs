@@ -10240,7 +10240,7 @@ ${sessions.size === 0 ? "No sub-agents have been spawned this session." : [...se
     ([sid, info]) => `- **${sid}** [${info.status}] (${info.label || info.agent_url}) \u2014 started ${info.startedAt}`
   ).join("\n")}
 
-When the user asks to continue, follow up, or dig deeper with existing agents, use the session IDs above with message_agent. Stopped agents can be resumed \u2014 their session IDs remain valid. Do NOT start new agents if the ones above can handle the request.`;
+When the user asks to continue, follow up, or dig deeper with existing agents, use the session IDs above with message_agent \u2014 but ONLY if they are [running]. Stopped agents must be re-started with start_agent before you can message them. Do NOT start new agents if running ones above can handle the request.`;
 }
 var tools = [
   {

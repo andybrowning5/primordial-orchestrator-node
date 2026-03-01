@@ -207,7 +207,7 @@ ${sessions.size === 0
         `- **${sid}** [${info.status}] (${info.label || info.agent_url}) — started ${info.startedAt}`
       ).join("\n")}
 
-When the user asks to continue, follow up, or dig deeper with existing agents, use the session IDs above with message_agent. Stopped agents can be resumed — their session IDs remain valid. Do NOT start new agents if the ones above can handle the request.`;
+When the user asks to continue, follow up, or dig deeper with existing agents, use the session IDs above with message_agent — but ONLY if they are [running]. Stopped agents must be re-started with start_agent before you can message them. Do NOT start new agents if running ones above can handle the request.`;
 }
 
 // --- Tools ---
