@@ -192,9 +192,9 @@ const toolHandlers = {
     log(`[orchestrator] starting: ${agent_url}`);
     for await (const event of socketStream({ type: "run", agent_url })) {
       if (event.type === "setup_status") {
-        send({ type: "activity", tool: "sub:setup", description: event.status || "", message_id: messageId });
+        send({ type: "activity", tool: "sub:setup", description: event.status || "", session_id: event.session_id || "", message_id: messageId });
       } else if (event.type === "session") {
-        send({ type: "activity", tool: "sub:spawned", description: event.session_id, message_id: messageId });
+        send({ type: "activity", tool: "sub:spawned", description: event.session_id, session_id: event.session_id, message_id: messageId });
         return event.session_id;
       } else if (event.type === "error") {
         return `Error: ${event.error || "unknown"}`;
@@ -218,11 +218,11 @@ const toolHandlers = {
         if (desc.startsWith(`${toolName}(`) && desc.endsWith(")")) {
           argsDesc = desc.slice(toolName.length + 1, -1);
         }
-        send({ type: "activity", tool: `sub:${toolName}`, description: argsDesc, message_id: messageId });
+        send({ type: "activity", tool: `sub:${toolName}`, description: argsDesc, session_id, message_id: messageId });
       } else if (inner.type === "response" && inner.done) {
         finalResponse = inner.content || "";
         const preview = finalResponse.replace(/\n/g, " ").slice(0, 150).trim();
-        send({ type: "activity", tool: "sub:response", description: preview + (finalResponse.length > 150 ? "..." : ""), message_id: messageId });
+        send({ type: "activity", tool: "sub:response", description: preview + (finalResponse.length > 150 ? "..." : ""), session_id, message_id: messageId });
         return JSON.stringify({ response: finalResponse, activities });
       }
     }
@@ -270,20 +270,26 @@ async function research(content, messageId) {
       return resp.content.filter((b) => b.type === "text").map((b) => b.text).join("") || "";
     }
 
-    // Process tool calls
+    // Process tool calls in parallel
     messages.push({ role: "assistant", content: resp.content });
 
-    const toolResults = [];
-    for (const block of resp.content) {
-      if (block.type !== "tool_use") continue;
-      let result;
-      try {
-        result = await toolHandlers[block.name](block.input, messageId);
-      } catch (e) {
-        result = `Error: ${e.message}`;
-      }
-      toolResults.push({ type: "tool_result", tool_use_id: block.id, content: typeof result === "string" ? result : JSON.stringify(result) });
-    }
+    const toolUseBlocks = resp.content.filter((b) => b.type === "tool_use");
+    const settled = await Promise.allSettled(
+      toolUseBlocks.map(async (block) => {
+        const handler = toolHandlers[block.name];
+        if (!handler) return { id: block.id, content: `Error: unknown tool ${block.name}` };
+        try {
+          const result = await handler(block.input, messageId);
+          return { id: block.id, content: typeof result === "string" ? result : JSON.stringify(result) };
+        } catch (e) {
+          return { id: block.id, content: `Error: ${e.message}` };
+        }
+      })
+    );
+    const toolResults = settled.map((s) => {
+      const val = s.status === "fulfilled" ? s.value : { id: "unknown", content: `Error: ${s.reason}` };
+      return { type: "tool_result", tool_use_id: val.id, content: val.content };
+    });
     messages.push({ role: "user", content: toolResults });
   }
 }
