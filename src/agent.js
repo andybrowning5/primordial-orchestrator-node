@@ -204,7 +204,7 @@ const toolHandlers = {
   },
 
   async message_agent({ session_id, message }, messageId) {
-    log(`[orchestrator] messaging ${session_id}: ${message}`);
+    log(`[orchestrator] messaging ${session_id} at ${Date.now()}: ${message.slice(0, 80)}`);
     const activities = [];
     let finalResponse = "";
     for await (const event of socketStream({ type: "message", session_id, content: message })) {
@@ -223,6 +223,7 @@ const toolHandlers = {
         finalResponse = inner.content || "";
         const preview = finalResponse.replace(/\n/g, " ").slice(0, 150).trim();
         send({ type: "activity", tool: "sub:response", description: preview + (finalResponse.length > 150 ? "..." : ""), session_id, message_id: messageId });
+        log(`[orchestrator] ${session_id} response received at ${Date.now()}`);
         return JSON.stringify({ response: finalResponse, activities });
       }
     }
