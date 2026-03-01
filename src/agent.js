@@ -49,39 +49,43 @@ async function socketRequest(msg) {
   });
 }
 
-async function socketRequestStream(msg) {
+async function* socketStream(msg) {
   const sock = await socketConnect();
   sock.write(JSON.stringify(msg) + "\n");
 
-  return new Promise((resolve) => {
-    const results = [];
-    let buf = "";
+  const queue = [];
+  let resolve;
+  let waiting = new Promise((r) => (resolve = r));
+  let ended = false;
 
-    sock.on("data", (chunk) => {
-      buf += chunk.toString();
-      let idx;
-      while ((idx = buf.indexOf("\n")) !== -1) {
-        const line = buf.slice(0, idx).trim();
-        buf = buf.slice(idx + 1);
-        if (line) {
-          try { results.push(JSON.parse(line)); } catch {}
-        }
-      }
-    });
+  const pushLine = (line) => {
+    try { queue.push(JSON.parse(line)); } catch {}
+    resolve();
+    waiting = new Promise((r) => (resolve = r));
+  };
 
-    sock.on("end", () => {
-      if (buf.trim()) {
-        try { results.push(JSON.parse(buf.trim())); } catch {}
-      }
-      sock.destroy();
-      resolve(results);
-    });
-
-    sock.on("error", () => {
-      sock.destroy();
-      resolve(results);
-    });
+  let buf = "";
+  sock.on("data", (chunk) => {
+    buf += chunk.toString();
+    let idx;
+    while ((idx = buf.indexOf("\n")) !== -1) {
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 1);
+      if (line) pushLine(line);
+    }
   });
+  sock.on("end", () => { ended = true; resolve(); });
+  sock.on("error", () => { ended = true; resolve(); });
+
+  try {
+    while (true) {
+      if (queue.length === 0 && !ended) await waiting;
+      if (queue.length === 0 && ended) return;
+      while (queue.length > 0) yield queue.shift();
+    }
+  } finally {
+    sock.destroy();
+  }
 }
 
 // --- System prompt ---
@@ -186,16 +190,13 @@ const toolHandlers = {
 
   async start_agent({ agent_url }, messageId) {
     log(`[orchestrator] starting: ${agent_url}`);
-    const events = await socketRequestStream({ type: "run", agent_url });
-    for (const event of events) {
+    for await (const event of socketStream({ type: "run", agent_url })) {
       if (event.type === "setup_status") {
         send({ type: "activity", tool: "sub:setup", description: event.status || "", message_id: messageId });
-      }
-      if (event.type === "session") {
+      } else if (event.type === "session") {
         send({ type: "activity", tool: "sub:spawned", description: event.session_id, message_id: messageId });
         return event.session_id;
-      }
-      if (event.type === "error") {
+      } else if (event.type === "error") {
         return `Error: ${event.error || "unknown"}`;
       }
     }
@@ -204,10 +205,9 @@ const toolHandlers = {
 
   async message_agent({ session_id, message }, messageId) {
     log(`[orchestrator] messaging ${session_id}: ${message}`);
-    const events = await socketRequestStream({ type: "message", session_id, content: message });
     const activities = [];
     let finalResponse = "";
-    for (const event of events) {
+    for await (const event of socketStream({ type: "message", session_id, content: message })) {
       if (event.type !== "stream_event") continue;
       const inner = event.event || {};
       if (inner.type === "activity") {
@@ -223,6 +223,7 @@ const toolHandlers = {
         finalResponse = inner.content || "";
         const preview = finalResponse.replace(/\n/g, " ").slice(0, 150).trim();
         send({ type: "activity", tool: "sub:response", description: preview + (finalResponse.length > 150 ? "..." : ""), message_id: messageId });
+        return JSON.stringify({ response: finalResponse, activities });
       }
     }
     return JSON.stringify({ response: finalResponse, activities });
