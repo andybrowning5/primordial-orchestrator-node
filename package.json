@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "build": "esbuild src/agent.js --bundle --platform=node --format=esm --outfile=bundle.mjs"
+    "build": "esbuild src/agent.js --bundle --platform=node --format=esm --outfile=bundle.mjs --banner:js=\"import{createRequire}from'module';const require=createRequire(import.meta.url);\""
   },
   "description": "Orchestrator agent that coordinates specialized sub-agents",
   "main": "src/agent.js",
