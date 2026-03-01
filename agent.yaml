@@ -1,25 +1,48 @@
-name: primordial-orchestrator
+name: primordial-orchestrator-node
+display_name: Primordial Orchestrator (Node.js)
 version: 0.1.0
-description: Orchestrator agent that coordinates specialized sub-agents on the Primordial AgentStore
-language: node
-model: claude-haiku-4-5-20251001
+description: >
+  Dynamic orchestrator that discovers and delegates to any agent on the
+  Primordial AgentStore. Uses primordial search to find the best agent for
+  each task, then spawns it as a sub-agent. No hardcoded agent URLs — it
+  adapts to whatever agents are available on the store.
+  Node.js port — faster sandbox setup via npm install.
 
-setup_command: npm install
-run_command: node src/agent.js
+category: general
+tags:
+  - orchestrator
+  - delegation
+  - multi-agent
+  - discovery
 
-delegation:
-  enabled: true
+author:
+  name: Andy Browning
+  github: andybrowning5
 
-keys: []
+runtime:
+  language: node
+  run_command: node src/agent.js
+  setup_command: npm install
+  dependencies: package.json
+  default_model:
+    provider: anthropic
+    model: claude-haiku-4-5-20251001
+  resources:
+    max_memory: 2GB
+    max_cpu: 2
+
+keys:
+  - provider: anthropic
+    domain: api.anthropic.com
+    auth_style: x-api-key
+    env_var: ANTHROPIC_API_KEY
+    required: true
 
 permissions:
-  network: true
-  filesystem: false
-
-metadata:
-  author: andy
-  category: orchestration
-  tags:
-    - orchestrator
-    - delegation
-    - multi-agent
+  network:
+    - domain: api.anthropic.com
+      reason: LLM inference for orchestration decisions
+  filesystem:
+    workspace: readwrite
+  delegation:
+    enabled: true

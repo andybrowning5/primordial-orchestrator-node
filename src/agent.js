@@ -3,7 +3,88 @@ import { createInterface } from "readline";
 import { connect } from "net";
 
 const SOCKET_PATH = "/tmp/_primordial_delegate.sock";
-const MODEL = "claude-haiku-4-5-20251001";
+const MODEL = process.env.ANTHROPIC_MODEL || "claude-haiku-4-5-20251001";
+
+const anthropic = new Anthropic();
+
+function send(msg) {
+  process.stdout.write(JSON.stringify(msg) + "\n");
+}
+
+function log(text) {
+  process.stderr.write(text + "\n");
+}
+
+// --- Socket helpers ---
+
+function socketConnect() {
+  return new Promise((resolve, reject) => {
+    const sock = connect(SOCKET_PATH, () => resolve(sock));
+    sock.on("error", reject);
+  });
+}
+
+async function socketRequest(msg) {
+  const sock = await socketConnect();
+  return new Promise((resolve, reject) => {
+    let buf = "";
+    sock.on("data", (chunk) => {
+      buf += chunk.toString();
+      const idx = buf.indexOf("\n");
+      if (idx !== -1) {
+        const line = buf.slice(0, idx);
+        sock.destroy();
+        try { resolve(JSON.parse(line)); } catch { resolve({ error: "Invalid JSON" }); }
+      }
+    });
+    sock.on("error", reject);
+    sock.on("end", () => {
+      if (buf.trim()) {
+        try { resolve(JSON.parse(buf.trim())); } catch { resolve({ error: "Invalid JSON" }); }
+      } else {
+        resolve({ error: "Connection closed" });
+      }
+    });
+    sock.write(JSON.stringify(msg) + "\n");
+  });
+}
+
+async function socketRequestStream(msg) {
+  const sock = await socketConnect();
+  sock.write(JSON.stringify(msg) + "\n");
+
+  return new Promise((resolve) => {
+    const results = [];
+    let buf = "";
+
+    sock.on("data", (chunk) => {
+      buf += chunk.toString();
+      let idx;
+      while ((idx = buf.indexOf("\n")) !== -1) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        if (line) {
+          try { results.push(JSON.parse(line)); } catch {}
+        }
+      }
+    });
+
+    sock.on("end", () => {
+      if (buf.trim()) {
+        try { results.push(JSON.parse(buf.trim())); } catch {}
+      }
+      sock.destroy();
+      resolve(results);
+    });
+
+    sock.on("error", () => {
+      sock.destroy();
+      resolve(results);
+    });
+  });
+}
+
+// --- System prompt ---
 
 const SYSTEM_PROMPT = `You are the Primordial Orchestrator. You coordinate specialized agents on the Primordial AgentStore.
 
@@ -30,319 +111,215 @@ You are a coordinator, not a doer. For every user request, call **list_all_agent
 - Tell the user which agent you're delegating to and why.
 - **NEVER stop a sub-agent without asking the user first.** Always confirm before calling stop_agent.`;
 
-const TOOLS = [
+// --- Tools ---
+
+const tools = [
   {
     name: "search_agents",
-    description: "Search for agents by query string on the AgentStore.",
+    description: "Semantic search for agents on the Primordial AgentStore. Returns agents ranked by relevance.",
     input_schema: {
       type: "object",
-      properties: {
-        query: { type: "string", description: "Search query to find agents" },
-      },
+      properties: { query: { type: "string", description: "Natural language description of the capability needed" } },
       required: ["query"],
     },
   },
   {
     name: "list_all_agents",
-    description: "List all available agents on the AgentStore.",
-    input_schema: {
-      type: "object",
-      properties: {},
-    },
+    description: "List all agents on the Primordial AgentStore sorted by popularity.",
+    input_schema: { type: "object", properties: {} },
   },
   {
     name: "start_agent",
-    description: "Start a sub-agent by its AgentStore URL. Returns a session_id for further interaction.",
+    description: "Spawn a sub-agent for multi-turn conversation. Returns a session_id.",
     input_schema: {
       type: "object",
-      properties: {
-        agent_url: { type: "string", description: "The agent URL to start" },
-      },
+      properties: { agent_url: { type: "string", description: "GitHub URL of the agent to run" } },
       required: ["agent_url"],
     },
   },
   {
     name: "message_agent",
-    description: "Send a message to a running sub-agent session and get its response.",
+    description: "Send a message to a running sub-agent and get its response.",
     input_schema: {
       type: "object",
       properties: {
-        session_id: { type: "string", description: "The session ID of the running agent" },
-        message: { type: "string", description: "The message to send to the agent" },
+        session_id: { type: "string", description: "Session ID from start_agent" },
+        message: { type: "string", description: "The message to send" },
       },
       required: ["session_id", "message"],
     },
   },
   {
     name: "monitor_agent",
-    description: "Check the current output/status of a running sub-agent.",
+    description: "View the last 1000 lines of a sub-agent's output.",
     input_schema: {
       type: "object",
-      properties: {
-        session_id: { type: "string", description: "The session ID to monitor" },
-      },
+      properties: { session_id: { type: "string", description: "Session ID from start_agent" } },
       required: ["session_id"],
     },
   },
   {
     name: "stop_agent",
-    description: "Stop a running sub-agent session. Only call after user confirms.",
+    description: "Shutdown a sub-agent session. IMPORTANT: Always ask the user for confirmation before calling this.",
     input_schema: {
       type: "object",
-      properties: {
-        session_id: { type: "string", description: "The session ID to stop" },
-      },
+      properties: { session_id: { type: "string", description: "Session ID from start_agent" } },
       required: ["session_id"],
     },
   },
 ];
 
-// --- Emit helpers ---
-
-function emit(obj) {
-  process.stdout.write(JSON.stringify(obj) + "\n");
-}
-
-function emitActivity(tool, description, messageId) {
-  emit({ type: "activity", tool, description, message_id: messageId });
-}
-
-// --- Socket helpers ---
-
-function _connect() {
-  return new Promise((resolve, reject) => {
-    const sock = connect(SOCKET_PATH, () => resolve(sock));
-    sock.on("error", reject);
-  });
-}
-
-async function _request(msg) {
-  const sock = await _connect();
-  return new Promise((resolve, reject) => {
-    let buf = "";
-    sock.on("data", (chunk) => {
-      buf += chunk.toString();
-      const idx = buf.indexOf("\n");
-      if (idx !== -1) {
-        const line = buf.slice(0, idx);
-        sock.destroy();
-        try {
-          resolve(JSON.parse(line));
-        } catch {
-          resolve({ error: "Invalid JSON response" });
-        }
-      }
-    });
-    sock.on("error", reject);
-    sock.on("end", () => {
-      if (buf.trim()) {
-        try { resolve(JSON.parse(buf.trim())); } catch { resolve({ error: "Invalid JSON response" }); }
-      } else {
-        resolve({ error: "Connection closed" });
-      }
-    });
-    sock.write(JSON.stringify(msg) + "\n");
-  });
-}
-
-async function* _requestStream(msg) {
-  const sock = await _connect();
-  sock.write(JSON.stringify(msg) + "\n");
-
-  let buf = "";
-  const lines = [];
-  let done = false;
-  let resolveLine;
-  let linePromise = new Promise((r) => (resolveLine = r));
-
-  sock.on("data", (chunk) => {
-    buf += chunk.toString();
-    let idx;
-    while ((idx = buf.indexOf("\n")) !== -1) {
-      const line = buf.slice(0, idx);
-      buf = buf.slice(idx + 1);
-      if (line.trim()) lines.push(line.trim());
-      resolveLine();
-      linePromise = new Promise((r) => (resolveLine = r));
-    }
-  });
-
-  sock.on("end", () => {
-    if (buf.trim()) lines.push(buf.trim());
-    done = true;
-    resolveLine();
-  });
-
-  sock.on("error", () => {
-    done = true;
-    resolveLine();
-  });
-
-  while (true) {
-    if (lines.length === 0 && !done) await linePromise;
-    if (lines.length === 0 && done) break;
-    while (lines.length > 0) {
-      const raw = lines.shift();
-      let parsed;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        continue;
-      }
-      yield parsed;
-      if (parsed.type === "done" || parsed.type === "error" || (parsed.type && !["stream", "setup_status", "activity"].includes(parsed.type))) {
-        sock.destroy();
-        return;
-      }
-    }
-  }
-  sock.destroy();
-}
-
 // --- Tool handlers ---
 
-async function handleSearchAgents(input, messageId) {
-  emitActivity("search_agents", `Searching agents: "${input.query}"`, messageId);
-  const resp = await _request({ type: "search", query: input.query });
-  return JSON.stringify(resp);
-}
+const toolHandlers = {
+  async search_agents({ query }) {
+    log(`[orchestrator] searching: ${query}`);
+    const resp = await socketRequest({ type: "search", query });
+    return JSON.stringify(resp.agents || []);
+  },
 
-async function handleListAllAgents(input, messageId) {
-  emitActivity("list_all_agents", "Listing all available agents", messageId);
-  const resp = await _request({ type: "search_all" });
-  return JSON.stringify(resp);
-}
+  async list_all_agents() {
+    log("[orchestrator] listing all agents");
+    const resp = await socketRequest({ type: "search_all" });
+    return JSON.stringify(resp.agents || []);
+  },
 
-async function handleStartAgent(input, messageId) {
-  emitActivity("start_agent", `Starting agent: ${input.agent_url}`, messageId);
-  let sessionId = null;
-  for await (const event of _requestStream({ type: "run", agent_url: input.agent_url })) {
-    if (event.type === "setup_status") {
-      emitActivity("sub:setup", event.message || event.status || "Setting up...", messageId);
+  async start_agent({ agent_url }, messageId) {
+    log(`[orchestrator] starting: ${agent_url}`);
+    const events = await socketRequestStream({ type: "run", agent_url });
+    for (const event of events) {
+      if (event.type === "setup_status") {
+        send({ type: "activity", tool: "sub:setup", description: event.status || "", message_id: messageId });
+      }
+      if (event.type === "session") {
+        send({ type: "activity", tool: "sub:spawned", description: event.session_id, message_id: messageId });
+        return event.session_id;
+      }
+      if (event.type === "error") {
+        return `Error: ${event.error || "unknown"}`;
+      }
     }
-    if (event.session_id) sessionId = event.session_id;
-  }
-  if (sessionId) return JSON.stringify({ session_id: sessionId });
-  return JSON.stringify({ error: "Failed to start agent" });
-}
+    return "Error: unexpected end of stream";
+  },
 
-async function handleMessageAgent(input, messageId) {
-  emitActivity("message_agent", `Messaging agent session ${input.session_id}`, messageId);
-  const activities = [];
-  let response = null;
-  for await (const event of _requestStream({ type: "message", session_id: input.session_id, content: input.message })) {
-    if (event.type === "activity") {
-      emitActivity(`sub:${event.tool || "activity"}`, event.description || "", messageId);
-      activities.push(event);
+  async message_agent({ session_id, message }, messageId) {
+    log(`[orchestrator] messaging ${session_id}: ${message}`);
+    const events = await socketRequestStream({ type: "message", session_id, content: message });
+    const activities = [];
+    let finalResponse = "";
+    for (const event of events) {
+      if (event.type !== "stream_event") continue;
+      const inner = event.event || {};
+      if (inner.type === "activity") {
+        const toolName = inner.tool || "";
+        const desc = inner.description || "";
+        activities.push({ tool: toolName, description: desc });
+        let argsDesc = desc;
+        if (desc.startsWith(`${toolName}(`) && desc.endsWith(")")) {
+          argsDesc = desc.slice(toolName.length + 1, -1);
+        }
+        send({ type: "activity", tool: `sub:${toolName}`, description: argsDesc, message_id: messageId });
+      } else if (inner.type === "response" && inner.done) {
+        finalResponse = inner.content || "";
+        const preview = finalResponse.replace(/\n/g, " ").slice(0, 150).trim();
+        send({ type: "activity", tool: "sub:response", description: preview + (finalResponse.length > 150 ? "..." : ""), message_id: messageId });
+      }
     }
-    if (event.type === "done" || event.response) {
-      response = event.response || event;
-    }
-  }
-  return JSON.stringify({ response, activities });
-}
+    return JSON.stringify({ response: finalResponse, activities });
+  },
 
-async function handleMonitorAgent(input, messageId) {
-  emitActivity("monitor_agent", `Monitoring session ${input.session_id}`, messageId);
-  const resp = await _request({ type: "monitor", session_id: input.session_id });
-  return JSON.stringify(resp);
-}
+  async monitor_agent({ session_id }) {
+    const resp = await socketRequest({ type: "monitor", session_id });
+    const lines = resp.lines || [];
+    return lines.length ? lines.join("\n") : "No output yet.";
+  },
 
-async function handleStopAgent(input, messageId) {
-  emitActivity("stop_agent", `Stopping session ${input.session_id}`, messageId);
-  await _request({ type: "stop", session_id: input.session_id });
-  return "Agent stopped.";
-}
-
-const TOOL_HANDLERS = {
-  search_agents: handleSearchAgents,
-  list_all_agents: handleListAllAgents,
-  start_agent: handleStartAgent,
-  message_agent: handleMessageAgent,
-  monitor_agent: handleMonitorAgent,
-  stop_agent: handleStopAgent,
+  async stop_agent({ session_id }) {
+    log(`[orchestrator] stopping ${session_id}`);
+    await socketRequest({ type: "stop", session_id });
+    return "Agent stopped.";
+  },
 };
 
 // --- Agentic loop ---
 
-async function handleMessage(userMessage) {
-  const client = new Anthropic();
-  const messages = [{ role: "user", content: userMessage }];
+async function research(content, messageId) {
+  const messages = [{ role: "user", content }];
 
   while (true) {
-    const resp = await client.messages.create({
+    const resp = await anthropic.messages.create({
       model: MODEL,
       max_tokens: 4096,
       system: SYSTEM_PROMPT,
-      tools: TOOLS,
+      tools,
       messages,
     });
 
-    // Collect text and tool_use blocks
-    const toolUseBlocks = resp.content.filter((b) => b.type === "tool_use");
-    const textBlocks = resp.content.filter((b) => b.type === "text");
+    // Emit activity for tool calls
+    for (const block of resp.content) {
+      if (block.type === "tool_use") {
+        const args = block.input || {};
+        const q = args.query || args.message || args.agent_url || args.session_id || "";
+        send({ type: "activity", tool: block.name, description: q ? `${block.name}(${q})` : block.name, message_id: messageId });
+      }
+    }
 
-    // If no tool calls, we're done — emit final text response
-    if (toolUseBlocks.length === 0 || resp.stop_reason === "end_turn") {
-      const text = textBlocks.map((b) => b.text).join("\n");
-      if (text) emit({ type: "response", content: text });
-      // If stop_reason is end_turn, break even if there were tool calls with text
-      if (resp.stop_reason === "end_turn" && toolUseBlocks.length === 0) break;
-      if (toolUseBlocks.length === 0) break;
+    // If no tool use, return final text
+    if (resp.stop_reason === "end_turn" || !resp.content.some((b) => b.type === "tool_use")) {
+      return resp.content.filter((b) => b.type === "text").map((b) => b.text).join("") || "";
     }
 
     // Process tool calls
     messages.push({ role: "assistant", content: resp.content });
 
     const toolResults = [];
-    for (const block of toolUseBlocks) {
-      const handler = TOOL_HANDLERS[block.name];
+    for (const block of resp.content) {
+      if (block.type !== "tool_use") continue;
       let result;
-      if (handler) {
-        try {
-          result = await handler(block.input, block.id);
-        } catch (err) {
-          result = JSON.stringify({ error: err.message });
-        }
-      } else {
-        result = JSON.stringify({ error: `Unknown tool: ${block.name}` });
+      try {
+        result = await toolHandlers[block.name](block.input, messageId);
+      } catch (e) {
+        result = `Error: ${e.message}`;
       }
-      toolResults.push({
-        type: "tool_result",
-        tool_use_id: block.id,
-        content: result,
-      });
+      toolResults.push({ type: "tool_result", tool_use_id: block.id, content: typeof result === "string" ? result : JSON.stringify(result) });
     }
-
     messages.push({ role: "user", content: toolResults });
-
-    // If end_turn with tool calls, emit text then break
-    if (resp.stop_reason === "end_turn") {
-      const text = textBlocks.map((b) => b.text).join("\n");
-      if (text) emit({ type: "response", content: text });
-      break;
-    }
   }
 }
 
-// --- Stdin/stdout NDJSON protocol ---
+// --- Primordial Protocol ---
 
-const rl = createInterface({ input: process.stdin });
+function main() {
+  send({ type: "ready" });
+  log("Primordial Orchestrator (Node.js) ready");
 
-rl.on("line", async (line) => {
-  let msg;
-  try {
-    msg = JSON.parse(line);
-  } catch {
-    emit({ type: "error", error: "Invalid JSON input" });
-    return;
-  }
+  const rl = createInterface({ input: process.stdin, terminal: false });
 
-  if (msg.type === "message" && msg.content) {
-    try {
-      await handleMessage(msg.content);
-    } catch (err) {
-      emit({ type: "error", error: err.message });
+  rl.on("line", async (line) => {
+    line = line.trim();
+    if (!line) return;
+
+    let msg;
+    try { msg = JSON.parse(line); } catch { return; }
+
+    if (msg.type === "shutdown") {
+      log("Shutting down");
+      rl.close();
+      return;
     }
-  }
-});
+
+    if (msg.type === "message") {
+      const mid = msg.message_id;
+      try {
+        const result = await research(msg.content, mid);
+        send({ type: "response", content: result, message_id: mid, done: true });
+      } catch (e) {
+        log(`Error: ${e.message}`);
+        send({ type: "error", error: e.message, message_id: mid });
+        send({ type: "response", content: `Something went wrong: ${e.message}`, message_id: mid, done: true });
+      }
+    }
+  });
+}
+
+main();
