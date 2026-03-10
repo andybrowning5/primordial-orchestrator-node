@@ -30,6 +30,7 @@ runtime:
   resources:
     max_memory: 2GB
     max_cpu: 2
+    max_time: "30m"
 
 keys:
   - provider: anthropic

@@ -1,6 +1,7 @@
 {
-  "name": "primordial-orchestrator",
+  "name": "primordial-orchestrator-node",
   "version": "0.1.0",
+  "private": true,
   "type": "module",
   "scripts": {
     "build": "esbuild src/agent.js --bundle --platform=node --format=esm --outfile=bundle.mjs --banner:js=\"import{createRequire}from'module';const require=createRequire(import.meta.url);\""
