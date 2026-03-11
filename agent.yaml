@@ -2,11 +2,9 @@ name: primordial-orchestrator-node
 display_name: Primordial Orchestrator (Node.js)
 version: 0.1.0
 description: >
-  Dynamic orchestrator that discovers and delegates to any agent on the
-  Primordial AgentStore. Uses primordial search to find the best agent for
-  each task, then spawns it as a sub-agent. No hardcoded agent URLs — it
-  adapts to whatever agents are available on the store.
-  Node.js port — faster sandbox setup via npm install.
+  Meta-agent that searches the AgentStore, picks the best agent for each task,
+  and delegates to it. Can run multiple sub-agents simultaneously and coordinate
+  multi-turn conversations with them.
 
 category: general
 tags:
