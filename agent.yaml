@@ -32,8 +32,6 @@ runtime:
 
 keys:
   - provider: anthropic
-    domain: api.anthropic.com
-    auth_style: x-api-key
     env_var: ANTHROPIC_API_KEY
     required: true
 
